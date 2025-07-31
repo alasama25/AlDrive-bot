@@ -16,28 +16,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-CONFIG_FILE = 'config.json'
-
 REDIRECT_PORT = int(os.getenv('PORT', '8080'))
 REDIRECT_HOST = os.getenv('REDIRECT_HOST', f'0.0.0.0:{REDIRECT_PORT}')
 REDIRECT_URI = f'http://{REDIRECT_HOST}/oauth2callback'
 
 SERVER_BIND_ADDRESS = '0.0.0.0'
 
-# Load config
-if not os.path.exists(CONFIG_FILE):
-    logger.error(f"{CONFIG_FILE} not found. Please create it with your Telegram token and Google API credentials.")
-    exit(1)
-
-with open(CONFIG_FILE, 'r') as f:
-    config = json.load(f)
-
-TELEGRAM_TOKEN = config.get('telegram_token')
-GOOGLE_CLIENT_ID = config.get('google_client_id')
-GOOGLE_CLIENT_SECRET = config.get('google_client_secret')
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
+GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
 
 if not TELEGRAM_TOKEN or not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
-    logger.error("Missing telegram_token or google_client_id or google_client_secret in config.json")
+    logger.error("Missing TELEGRAM_TOKEN or GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET environment variables")
     exit(1)
 
 # Since we remove local session and file storage, we keep sessions and files in memory only (will reset on restart)
