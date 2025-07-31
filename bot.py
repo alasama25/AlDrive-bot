@@ -390,6 +390,9 @@ async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Gagal menghapus file.")
 
 def main():
+    import asyncio
+    from aiohttp import web
+
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     conv_handler = ConversationHandler(
@@ -410,19 +413,25 @@ def main():
     application.add_handler(CommandHandler("menu", menu))
     application.add_handler(conv_handler)
 
-    # Start aiohttp server in background
-    import threading
-    from aiohttp import web
+    async def start_all():
+        # Jalanin Telegram bot
+        asyncio.create_task(application.initialize())
+        asyncio.create_task(application.start())
+        asyncio.create_task(application.updater.start_polling())
 
-    app_web = web.Application()
-    app_web.add_routes(routes)
+        # Jalanin aiohttp server utama
+        app_web = web.Application()
+        app_web.add_routes(routes)
+        runner = web.AppRunner(app_web)
+        await runner.setup()
+        site = web.TCPSite(runner, host=SERVER_BIND_ADDRESS, port=REDIRECT_PORT)
+        await site.start()
 
-    def run_web():
-        web.run_app(app_web, host=SERVER_BIND_ADDRESS, port=REDIRECT_PORT)
+        # Biarkan server tetap jalan
+        while True:
+            await asyncio.sleep(3600)
 
-    threading.Thread(target=run_web, daemon=True).start()
-
-    application.run_polling()
+    asyncio.run(start_all())
 
 if __name__ == '__main__':
     main()
