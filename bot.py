@@ -17,8 +17,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 REDIRECT_PORT = int(os.getenv('PORT', '8080'))
-REDIRECT_HOST = os.getenv('REDIRECT_HOST', f'0.0.0.0:{REDIRECT_PORT}')
-REDIRECT_URI = f'http://{REDIRECT_HOST}/oauth2callback'
+REDIRECT_HOST = os.getenv('REDIRECT_HOST', '0.0.0.0')
+REDIRECT_URI = f'https://{REDIRECT_HOST}/oauth2callback'
 
 SERVER_BIND_ADDRESS = '0.0.0.0'
 
