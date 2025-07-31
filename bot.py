@@ -22,8 +22,7 @@ import re
 raw_redirect_host = os.getenv('REDIRECT_HOST', '0.0.0.0')
 # Remove port if present
 REDIRECT_HOST = re.sub(r':\\d+$', '', raw_redirect_host)
-REDIRECT_URI = 'urn:ietf:wg:oauth:2.0:oob'
-
+REDIRECT_URI = f'https://{REDIRECT_HOST}/oauth2callback'
 
 SERVER_BIND_ADDRESS = '0.0.0.0'
 
@@ -56,8 +55,25 @@ def create_flow(state=None):
         state=state
     )
 
+from aiohttp import web
+
 # We remove HTTP server and get_auth_code function
 # Instead, user must manually provide the auth code from the redirect URL
+
+routes = web.RouteTableDef()
+
+@routes.get('/oauth2callback')
+async def oauth2callback(request):
+    code = request.query.get('code')
+    state = request.query.get('state')
+    if not code or not state:
+        return web.Response(text="Kode atau state tidak ditemukan di URL.", status=400)
+    # Simpan kode dan state ke tempat yang bisa diakses oleh bot, misalnya file sementara atau variabel global
+    # Untuk kesederhanaan, kita simpan di file sementara dengan nama berdasarkan state (user_id)
+    filename = f"auth_code_{state}.txt"
+    with open(filename, 'w') as f:
+        f.write(code)
+    return web.Response(text="Login berhasil! Anda dapat kembali ke Telegram dan melanjutkan.")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
