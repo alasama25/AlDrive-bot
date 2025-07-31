@@ -22,7 +22,8 @@ import re
 raw_redirect_host = os.getenv('REDIRECT_HOST', '0.0.0.0')
 # Remove port if present
 REDIRECT_HOST = re.sub(r':\\d+$', '', raw_redirect_host)
-REDIRECT_URI = f'https://{REDIRECT_HOST}/oauth2callback'
+REDIRECT_URI = 'urn:ietf:wg:oauth:2.0:oob'
+
 
 SERVER_BIND_ADDRESS = '0.0.0.0'
 
