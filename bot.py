@@ -410,6 +410,18 @@ def main():
     application.add_handler(CommandHandler("menu", menu))
     application.add_handler(conv_handler)
 
+    # Start aiohttp server in background
+    import threading
+    from aiohttp import web
+
+    app_web = web.Application()
+    app_web.add_routes(routes)
+
+    def run_web():
+        web.run_app(app_web, host=SERVER_BIND_ADDRESS, port=REDIRECT_PORT)
+
+    threading.Thread(target=run_web, daemon=True).start()
+
     application.run_polling()
 
 if __name__ == '__main__':
