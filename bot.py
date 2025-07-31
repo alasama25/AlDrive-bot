@@ -16,7 +16,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-REDIRECT_PORT = int(os.getenv('PORT', '8080'))
+REDIRECT_PORT = int(os.getenv('PORT', '80'))
 import re
 
 raw_redirect_host = os.getenv('REDIRECT_HOST', '0.0.0.0')
