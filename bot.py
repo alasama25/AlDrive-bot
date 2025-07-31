@@ -1,7 +1,9 @@
 import json
 import logging
 import os
-
+import asyncio
+import threading
+from aiohttp import web
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -17,10 +19,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 REDIRECT_PORT = int(os.getenv('PORT', '8080'))
-import re
-
 raw_redirect_host = os.getenv('REDIRECT_HOST', '0.0.0.0')
-# Remove port if present
 REDIRECT_HOST = re.sub(r':\\d+$', '', raw_redirect_host)
 REDIRECT_URI = f'https://{REDIRECT_HOST}/oauth2callback'
 
@@ -33,10 +32,6 @@ GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
 if not TELEGRAM_TOKEN or not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
     logger.error("Missing TELEGRAM_TOKEN or GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET environment variables")
     exit(1)
-
-# Since we remove local session and file storage, we keep sessions and files in memory only (will reset on restart)
-sessions = {}  # user_id -> credentials dict
-files = {}     # user_id -> list of files metadata
 
 # OAuth2 flow setup
 def create_flow(state=None):
@@ -55,10 +50,9 @@ def create_flow(state=None):
         state=state
     )
 
-from aiohttp import web
-
-# We remove HTTP server and get_auth_code function
-# Instead, user must manually provide the auth code from the redirect URL
+# Sessions and file data
+sessions = {}  # user_id -> credentials dict
+files = {}     # user_id -> list of files metadata
 
 routes = web.RouteTableDef()
 
@@ -97,32 +91,9 @@ async def login(update: Update, context: ContextTypes.DEFAULT_TYPE):
     auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline', include_granted_scopes='true')
     await update.message.reply_text(
         f"Silakan klik link berikut untuk login:\n{auth_url}\n\n"
-        "Setelah login, Anda akan diarahkan ke halaman yang mengatakan login berhasil.\n"
-        "Salin kode 'code' dari URL dan kirim ke bot dengan perintah /auth <kode>."
+        "Setelah login, Anda akan otomatis diarahkan ke halaman login berhasil. "
+        "Tidak perlu kirim kode lagi ke bot."
     )
-
-async def auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if len(context.args) != 1:
-        await update.message.reply_text("Gunakan perintah: /auth <kode>")
-        return
-    code = context.args[0]
-    flow = create_flow(state=str(user_id))
-    try:
-        flow.fetch_token(code=code)
-        creds = flow.credentials
-        sessions[str(user_id)] = {
-            'token': creds.token,
-            'refresh_token': creds.refresh_token,
-            'token_uri': creds.token_uri,
-            'client_id': creds.client_id,
-            'client_secret': creds.client_secret,
-            'scopes': creds.scopes
-        }
-        await update.message.reply_text("Login berhasil! Anda sekarang dapat mengupload file.")
-    except Exception as e:
-        logger.error(f"Error fetching token: {e}")
-        await update.message.reply_text("Gagal login, kode tidak valid atau sudah kadaluarsa.")
 
 async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -149,7 +120,6 @@ def load_credentials(user_id):
     if creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
-            # Update session with refreshed token
             sessions[str(user_id)] = {
                 'token': creds.token,
                 'refresh_token': creds.refresh_token,
@@ -188,49 +158,6 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += "\nGunakan perintah /delete <nomor_file> untuk menghapus file."
     await update.message.reply_text(msg)
 
-async def get_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    service = get_drive_service(user_id)
-    if not service:
-        await update.message.reply_text("Anda belum login. Gunakan /login untuk login.")
-        return
-
-    if len(context.args) != 1:
-        await update.message.reply_text("Gunakan perintah: /get <nomor_file>")
-        return
-
-    try:
-        file_index = int(context.args[0]) - 1
-    except ValueError:
-        await update.message.reply_text("Nomor file harus berupa angka.")
-        return
-
-    user_files = files.get(str(user_id), [])
-    if file_index < 0 or file_index >= len(user_files):
-        await update.message.reply_text("Nomor file tidak valid.")
-        return
-
-    file_metadata = user_files[file_index]
-    file_id = file_metadata['id']
-    file_name = file_metadata.get('name', 'file')
-
-    try:
-        request = service.files().get_media(fileId=file_id)
-        fh = open(f'temp_{file_id}', 'wb')
-        downloader = googleapiclient.http.MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            status, done = downloader.next_chunk()
-        fh.close()
-
-        with open(f'temp_{file_id}', 'rb') as f:
-            await update.message.reply_document(f, filename=file_name)
-
-        os.remove(f'temp_{file_id}')
-    except Exception as e:
-        logger.error(f"Error downloading file {file_id}: {e}")
-        await update.message.reply_text("Gagal mengunduh file.")
-
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     service = get_drive_service(user_id)
@@ -258,7 +185,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file_metadata = {'name': file_name}
             uploaded_file = service.files().create(body=file_metadata, media_body=media, fields='id, name').execute()
 
-            # Save metadata in memory only
             user_files = files.get(str(user_id), [])
             user_files.append({'id': uploaded_file['id'], 'name': file_name, 'mime_type': mime_type})
             files[str(user_id)] = user_files
@@ -334,7 +260,6 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Menu perintah yang tersedia:\n"
         "/start - Mulai bot\n"
         "/login - Login ke Google Drive\n"
-        "/auth <kode> - Kirim kode otentikasi setelah login\n"
         "/logout - Logout dari Google Drive\n"
         "/list - Daftar file yang diupload\n"
         "/get <nomor_file> - Unduh file berdasarkan nomor\n"
@@ -344,12 +269,6 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- Kirim file yang ingin diupload ke bot.\n"
         "- Anda dapat memberikan nama file dengan mengirim caption saat mengirim file.\n"
         "- Jika tidak memberikan caption, bot akan meminta Anda mengirim nama file (termasuk ekstensi).\n"
-        "- Contoh nama file yang valid:\n"
-        "  - dokumen.pdf\n"
-        "  - foto_liburan.jpg\n"
-        "  - laporan_keuangan.xlsx\n"
-        "  - presentasi.pptx\n"
-        "  - musik.mp3\n"
         "- Pastikan menyertakan ekstensi file yang sesuai agar file dapat dikenali dengan benar."
     )
     await update.message.reply_text(commands_text)
@@ -389,49 +308,25 @@ async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error deleting file {file_id}: {e}")
         await update.message.reply_text("Gagal menghapus file.")
 
+async def start_all():
+    # INISIALISASI
+    await application.initialize()
+
+    # JALANKAN BOT TELEGRAM
+    await application.start()
+    await application.updater.start_polling()
+
+    # JALANKAN WEB SERVER AIOHTTP
+    app_web = web.Application()
+    app_web.add_routes(routes)
+    runner = web.AppRunner(app_web)
+    await runner.setup()
+    site = web.TCPSite(runner, host=SERVER_BIND_ADDRESS, port=REDIRECT_PORT)
+    await site.start()
+
+    # Biar gak langsung exit
+    while True:
+        await asyncio.sleep(3600)
+
 def main():
-    import asyncio
-    from aiohttp import web
-
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-    conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file)],
-        states={
-            ASK_FILENAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_filename)],
-        },
-        fallbacks=[],
-    )
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("login", login))
-    application.add_handler(CommandHandler("auth", auth))
-    application.add_handler(CommandHandler("logout", logout))
-    application.add_handler(CommandHandler("list", list_files))
-    application.add_handler(CommandHandler("get", get_file))
-    application.add_handler(CommandHandler("delete", delete_file))
-    application.add_handler(CommandHandler("menu", menu))
-    application.add_handler(conv_handler)
-
-    async def start_all():
-        # Jalanin Telegram bot
-        asyncio.create_task(application.initialize())
-        asyncio.create_task(application.start())
-        asyncio.create_task(application.updater.start_polling())
-
-        # Jalanin aiohttp server utama
-        app_web = web.Application()
-        app_web.add_routes(routes)
-        runner = web.AppRunner(app_web)
-        await runner.setup()
-        site = web.TCPSite(runner, host=SERVER_BIND_ADDRESS, port=REDIRECT_PORT)
-        await site.start()
-
-        # Biarkan server tetap jalan
-        while True:
-            await asyncio.sleep(3600)
-
     asyncio.run(start_all())
-
-if __name__ == '__main__':
-    main()
