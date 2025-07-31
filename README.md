@@ -69,27 +69,6 @@ python bot.py
 
 6. Pastikan redirect URI di Google Cloud Console sudah disesuaikan dengan `http://your-app-name.up.railway.app:PORT/oauth2callback`.
 
-## Menjalankan Bot Secara Lokal
-
-Untuk menjalankan bot secara lokal, cukup jalankan:
-
-```bash
-python bot.py
-```
-
-Bot akan menggunakan `localhost:8080` sebagai redirect URI secara default.
-
-Jika ingin mengubah port atau host redirect, Anda dapat mengatur environment variable sebelum menjalankan bot, misalnya:
-
-```bash
-export PORT=8080
-export REDIRECT_HOST=localhost:8080
-python bot.py
-```
-
-Pastikan redirect URI di Google Cloud Console sesuai dengan konfigurasi ini.
-
-
 ## Perintah Bot
 
 - `/login` - Memulai proses login Google Drive.
