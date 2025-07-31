@@ -68,12 +68,23 @@ async def oauth2callback(request):
     state = request.query.get('state')
     if not code or not state:
         return web.Response(text="Kode atau state tidak ditemukan di URL.", status=400)
-    # Simpan kode dan state ke tempat yang bisa diakses oleh bot, misalnya file sementara atau variabel global
-    # Untuk kesederhanaan, kita simpan di file sementara dengan nama berdasarkan state (user_id)
-    filename = f"auth_code_{state}.txt"
-    with open(filename, 'w') as f:
-        f.write(code)
-    return web.Response(text="Login berhasil! Anda dapat kembali ke Telegram dan melanjutkan.")
+    
+    flow = create_flow(state=state)
+    try:
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+        sessions[str(state)] = {
+            'token': creds.token,
+            'refresh_token': creds.refresh_token,
+            'token_uri': creds.token_uri,
+            'client_id': creds.client_id,
+            'client_secret': creds.client_secret,
+            'scopes': creds.scopes
+        }
+        return web.Response(text="Login berhasil! Sekarang Anda bisa kembali ke Telegram dan upload file.")
+    except Exception as e:
+        logger.error(f"Error fetching token in callback: {e}")
+        return web.Response(text="Gagal mengambil token. Coba ulangi login.", status=400)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
