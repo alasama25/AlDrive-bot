@@ -1,31 +1,29 @@
 import json
 import logging
 import os
-import re
-import asyncio
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 import googleapiclient.http
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, filters,
-    ContextTypes, CallbackQueryHandler, ConversationHandler
-)
-
-from aiohttp import web
-import telegram
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, ConversationHandler
 
 # Setup logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
 REDIRECT_PORT = int(os.getenv('PORT', '8080'))
+import re
+
 raw_redirect_host = os.getenv('REDIRECT_HOST', '0.0.0.0')
-REDIRECT_HOST = re.sub(r':\d+$', '', raw_redirect_host)
+# Remove port if present
+REDIRECT_HOST = re.sub(r':\\d+$', '', raw_redirect_host)
 REDIRECT_URI = f'https://{REDIRECT_HOST}/oauth2callback'
+
 SERVER_BIND_ADDRESS = '0.0.0.0'
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
@@ -36,9 +34,11 @@ if not TELEGRAM_TOKEN or not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
     logger.error("Missing TELEGRAM_TOKEN or GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET environment variables")
     exit(1)
 
-sessions = {}
-files = {}
+# Since we remove local session and file storage, we keep sessions and files in memory only (will reset on restart)
+sessions = {}  # user_id -> credentials dict
+files = {}     # user_id -> list of files metadata
 
+# OAuth2 flow setup
 def create_flow(state=None):
     return Flow.from_client_config(
         {
@@ -55,6 +55,11 @@ def create_flow(state=None):
         state=state
     )
 
+from aiohttp import web
+
+# We remove HTTP server and get_auth_code function
+# Instead, user must manually provide the auth code from the redirect URL
+
 routes = web.RouteTableDef()
 
 @routes.get('/oauth2callback')
@@ -63,23 +68,17 @@ async def oauth2callback(request):
     state = request.query.get('state')
     if not code or not state:
         return web.Response(text="Kode atau state tidak ditemukan di URL.", status=400)
+    # Simpan kode dan state ke tempat yang bisa diakses oleh bot, misalnya file sementara atau variabel global
+    # Untuk kesederhanaan, kita simpan di file sementara dengan nama berdasarkan state (user_id)
     filename = f"auth_code_{state}.txt"
     with open(filename, 'w') as f:
         f.write(code)
     return web.Response(text="Login berhasil! Anda dapat kembali ke Telegram dan melanjutkan.")
 
-@routes.post('/telegram')
-async def telegram_webhook(request):
-    data = await request.json()
-    update = telegram.Update.de_json(data, bot)
-    await application.update_queue.put(update)
-    return web.Response(text='OK')
-
-async def on_startup(app):
-    await bot.set_webhook(f"https://{REDIRECT_HOST}/telegram")
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Selamat datang! Gunakan /login untuk login ke Google Drive Anda.")
+    await update.message.reply_text(
+        "Selamat datang! Gunakan /login untuk login ke Google Drive Anda."
+    )
 
 async def login(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -139,6 +138,7 @@ def load_credentials(user_id):
     if creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
+            # Update session with refreshed token
             sessions[str(user_id)] = {
                 'token': creds.token,
                 'refresh_token': creds.refresh_token,
@@ -164,10 +164,12 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not service:
         await update.message.reply_text("Anda belum login. Gunakan /login untuk login.")
         return
+
     user_files = files.get(str(user_id), [])
     if not user_files:
         await update.message.reply_text("Anda belum mengupload file apapun.")
         return
+
     msg = "File yang sudah Anda upload:\n"
     for idx, f in enumerate(user_files, start=1):
         mime = f.get('mime_type', 'unknown')
@@ -181,21 +183,26 @@ async def get_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not service:
         await update.message.reply_text("Anda belum login. Gunakan /login untuk login.")
         return
+
     if len(context.args) != 1:
         await update.message.reply_text("Gunakan perintah: /get <nomor_file>")
         return
+
     try:
         file_index = int(context.args[0]) - 1
     except ValueError:
         await update.message.reply_text("Nomor file harus berupa angka.")
         return
+
     user_files = files.get(str(user_id), [])
     if file_index < 0 or file_index >= len(user_files):
         await update.message.reply_text("Nomor file tidak valid.")
         return
+
     file_metadata = user_files[file_index]
     file_id = file_metadata['id']
     file_name = file_metadata.get('name', 'file')
+
     try:
         request = service.files().get_media(fileId=file_id)
         fh = open(f'temp_{file_id}', 'wb')
@@ -204,8 +211,10 @@ async def get_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         while not done:
             status, done = downloader.next_chunk()
         fh.close()
+
         with open(f'temp_{file_id}', 'rb') as f:
             await update.message.reply_document(f, filename=file_name)
+
         os.remove(f'temp_{file_id}')
     except Exception as e:
         logger.error(f"Error downloading file {file_id}: {e}")
@@ -217,25 +226,32 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not service:
         await update.message.reply_text("Anda belum login. Gunakan /login untuk login.")
         return
+
     file = update.message.document or (update.message.photo[-1] if update.message.photo else None)
     if not file:
         await update.message.reply_text("File tidak ditemukan.")
         return
+
     file_id = file.file_id
     mime_type = file.mime_type if hasattr(file, 'mime_type') else 'application/octet-stream'
+
     caption = update.message.caption
     if caption and caption.strip():
         file_name = caption.strip()
         file_obj = await context.bot.get_file(file_id)
         file_path = f'temp_{file_id}'
         await file_obj.download_to_drive(file_path)
+
         try:
             media = googleapiclient.http.MediaFileUpload(file_path, mimetype=mime_type, resumable=True)
             file_metadata = {'name': file_name}
             uploaded_file = service.files().create(body=file_metadata, media_body=media, fields='id, name').execute()
+
+            # Save metadata in memory only
             user_files = files.get(str(user_id), [])
             user_files.append({'id': uploaded_file['id'], 'name': file_name, 'mime_type': mime_type})
             files[str(user_id)] = user_files
+
             await update.message.reply_text(f"File '{file_name}' berhasil diupload ke Google Drive.")
         except Exception as e:
             logger.error(f"Error uploading file: {e}")
@@ -250,6 +266,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'original_file_name': original_file_name,
             'mime_type': mime_type
         }
+
         await update.message.reply_text(
             f"File diterima: {original_file_name}\n"
             "Silakan kirim nama file yang ingin Anda gunakan untuk menyimpan file ini (termasuk ekstensi)."
@@ -262,27 +279,34 @@ async def receive_filename(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'upload_file_info' not in context.user_data:
         await update.message.reply_text("Tidak ada file yang sedang diupload. Silakan kirim file terlebih dahulu.")
         return ConversationHandler.END
+
     file_info = context.user_data['upload_file_info']
     file_id = file_info['file_id']
     mime_type = file_info['mime_type']
+
     file_name = update.message.text.strip()
     if not file_name:
         await update.message.reply_text("Nama file tidak boleh kosong. Silakan kirim nama file yang valid.")
         return ASK_FILENAME
+
     service = get_drive_service(user_id)
     if not service:
         await update.message.reply_text("Anda belum login. Gunakan /login untuk login.")
         return ConversationHandler.END
+
     file_obj = await context.bot.get_file(file_id)
     file_path = f'temp_{file_id}'
     await file_obj.download_to_drive(file_path)
+
     try:
         media = googleapiclient.http.MediaFileUpload(file_path, mimetype=mime_type, resumable=True)
         file_metadata = {'name': file_name}
         uploaded_file = service.files().create(body=file_metadata, media_body=media, fields='id, name').execute()
+
         user_files = files.get(str(user_id), [])
         user_files.append({'id': uploaded_file['id'], 'name': file_name, 'mime_type': mime_type})
         files[str(user_id)] = user_files
+
         await update.message.reply_text(f"File '{file_name}' berhasil diupload ke Google Drive.")
     except Exception as e:
         logger.error(f"Error uploading file: {e}")
@@ -290,6 +314,7 @@ async def receive_filename(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         if os.path.exists(file_path):
             os.remove(file_path)
+
     context.user_data.pop('upload_file_info', None)
     return ConversationHandler.END
 
@@ -306,8 +331,15 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/menu - Tampilkan menu perintah ini\n\n"
         "Instruksi Upload File:\n"
         "- Kirim file yang ingin diupload ke bot.\n"
-        "- Kirim nama file jika gak kasih caption.\n"
-        "- Contoh: dokumen.pdf, foto.jpg, dll."
+        "- Anda dapat memberikan nama file dengan mengirim caption saat mengirim file.\n"
+        "- Jika tidak memberikan caption, bot akan meminta Anda mengirim nama file (termasuk ekstensi).\n"
+        "- Contoh nama file yang valid:\n"
+        "  - dokumen.pdf\n"
+        "  - foto_liburan.jpg\n"
+        "  - laporan_keuangan.xlsx\n"
+        "  - presentasi.pptx\n"
+        "  - musik.mp3\n"
+        "- Pastikan menyertakan ekstensi file yang sesuai agar file dapat dikenali dengan benar."
     )
     await update.message.reply_text(commands_text)
 
@@ -317,21 +349,26 @@ async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not service:
         await update.message.reply_text("Anda belum login. Gunakan /login untuk login.")
         return
+
     if len(context.args) != 1:
         await update.message.reply_text("Gunakan perintah: /delete <nomor_file>")
         return
+
     try:
         file_index = int(context.args[0]) - 1
     except ValueError:
         await update.message.reply_text("Nomor file harus berupa angka.")
         return
+
     user_files = files.get(str(user_id), [])
     if file_index < 0 or file_index >= len(user_files):
         await update.message.reply_text("Nomor file tidak valid.")
         return
+
     file_metadata = user_files[file_index]
     file_id = file_metadata['id']
     file_name = file_metadata.get('name', 'file')
+
     try:
         service.files().delete(fileId=file_id).execute()
         user_files.pop(file_index)
@@ -342,14 +379,14 @@ async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Gagal menghapus file.")
 
 def main():
-    global bot, application
-    bot = telegram.Bot(token=TELEGRAM_TOKEN)
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file)],
-        states={ASK_FILENAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_filename)]},
-        fallbacks=[]
+        states={
+            ASK_FILENAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_filename)],
+        },
+        fallbacks=[],
     )
 
     application.add_handler(CommandHandler("start", start))
@@ -362,11 +399,7 @@ def main():
     application.add_handler(CommandHandler("menu", menu))
     application.add_handler(conv_handler)
 
-    app = web.Application()
-    app.add_routes(routes)
-    app.on_startup.append(on_startup)
-
-    web.run_app(app, host=SERVER_BIND_ADDRESS, port=REDIRECT_PORT)
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
