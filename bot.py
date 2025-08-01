@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
@@ -8,7 +9,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 from aiohttp import web
 
-# Konfigurasi logging
+# Setup logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -17,62 +18,56 @@ logger = logging.getLogger(__name__)
 
 class DriveBot:
     def __init__(self):
-        # Ambil konfigurasi dari environment variables
+        # Validasi environment variables
+        required_vars = ['TELEGRAM_TOKEN', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET']
+        missing_vars = [var for var in required_vars if not os.getenv(var)]
+        if missing_vars:
+            raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+
         self.token = os.getenv('TELEGRAM_TOKEN')
         self.client_id = os.getenv('GOOGLE_CLIENT_ID')
         self.client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
         self.redirect_uri = os.getenv('REDIRECT_URI', 'https://aldrive-bot.up.railway.app/oauth2callback')
+        self.user_sessions = {}
+
+    async def upload_to_drive(self, user_id, file_path, file_name):
+        """Helper function for drive upload"""
+        creds = Credentials(**self.user_sessions[user_id]['creds'])
+        service = build('drive', 'v3', credentials=creds)
         
-        # In-memory storage (produksi sebaiknya pakai database)
-        self.user_sessions = {}  # Format: {user_id: {'creds': creds_dict, 'files': [file_list]}}
-        
-        if not all([self.token, self.client_id, self.client_secret]):
-            raise ValueError("Missing required environment variables")
+        file_metadata = {'name': file_name}
+        media = MediaFileUpload(file_path)
+        return service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id,name'
+        ).execute()
 
     async def handle_upload(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Menangani upload file"""
-        user_id = update.effective_user.id
-        
-        if user_id not in self.user_sessions:
-            await update.message.reply_text("❌ Anda belum login. Gunakan /login terlebih dahulu.")
-            return
-
         try:
+            user_id = update.effective_user.id
+            if user_id not in self.user_sessions:
+                await update.message.reply_text("❌ Silakan login dulu dengan /login")
+                return
+
             document = update.message.document or update.message.photo[-1]
             file = await context.bot.get_file(document.file_id)
-            file_path = f"/tmp/{document.file_id}"
-            await file.download_to_drive(file_path)
+            temp_path = f"/tmp/{document.file_id}"
             
-            # Upload ke Google Drive
-            creds = Credentials(**self.user_sessions[user_id]['creds'])
-            service = build('drive', 'v3', credentials=creds)
+            await file.download_to_drive(temp_path)
+            result = await self.upload_to_drive(user_id, temp_path, document.file_name or f"file_{document.file_id}")
             
-            file_metadata = {'name': document.file_name or f"file_{document.file_id}"}
-            media = MediaFileUpload(file_path)
-            
-            drive_file = service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields='id,name'
-            ).execute()
-            
-            # Simpan file metadata
             if 'files' not in self.user_sessions[user_id]:
                 self.user_sessions[user_id]['files'] = []
+            self.user_sessions[user_id]['files'].append({'id': result['id'], 'name': result['name']})
             
-            self.user_sessions[user_id]['files'].append({
-                'id': drive_file.get('id'),
-                'name': drive_file.get('name')
-            })
-            
-            await update.message.reply_text(f"✅ File {drive_file.get('name')} berhasil diunggah!")
-            
+            await update.message.reply_text(f"✅ Berhasil upload: {result['name']}")
+
         except Exception as e:
-            logger.error(f"Upload error: {e}")
-            await update.message.reply_text(f"❌ Gagal mengupload file: {str(e)}")
+            logger.error(f"Upload error: {str(e)}")
+            await update.message.reply_text(f"❌ Error: {str(e)}")
 
     def get_auth_url(self, user_id):
-        """Generate OAuth URL"""
         flow = Flow.from_client_config(
             {
                 "web": {
@@ -85,31 +80,24 @@ class DriveBot:
             scopes=['https://www.googleapis.com/auth/drive.file'],
             redirect_uri=self.redirect_uri
         )
-        
-        auth_url, _ = flow.authorization_url(
+        return flow.authorization_url(
             access_type='offline',
             prompt='consent',
             state=str(user_id)
-        )
-        return auth_url
+        )[0]
 
     async def handle_login(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handler perintah /login"""
         auth_url = self.get_auth_url(update.effective_user.id)
-        await update.message.reply_text(
-            f"🔗 Silakan login via Google:\n{auth_url}\n\n"
-            "Setelah berhasil, Anda bisa langsung mengupload file."
-        )
+        await update.message.reply_text(f"🔗 Login disini: {auth_url}")
 
-    async def handle_oauth_callback(self, request):
-        """Menangani OAuth callback"""
+    async def oauth_callback(self, request):
         try:
-            user_id = request.query.get('state')
+            user_id = int(request.query.get('state'))
             code = request.query.get('code')
             
             if not code:
-                return web.Response(text="Error: Missing authorization code")
-            
+                return web.Response(text="Missing authorization code", status=400)
+
             flow = Flow.from_client_config(
                 {
                     "web": {
@@ -126,8 +114,7 @@ class DriveBot:
             flow.fetch_token(code=code)
             creds = flow.credentials
             
-            # Simpan credentials
-            self.user_sessions[int(user_id)] = {
+            self.user_sessions[user_id] = {
                 'creds': {
                     'token': creds.token,
                     'refresh_token': creds.refresh_token,
@@ -139,38 +126,46 @@ class DriveBot:
             }
             
             return web.Response(
-                text="Login berhasil! Kembali ke Telegram untuk mulai mengupload.",
+                text="Login berhasil! Kembali ke Telegram",
                 headers={'Content-Type': 'text/plain; charset=utf-8'}
             )
-            
+
         except Exception as e:
-            logger.error(f"Callback error: {e}")
+            logger.error(f"OAuth callback error: {str(e)}")
             return web.Response(
                 text=f"Error: {str(e)}",
                 status=500
             )
 
-async def main():
+async def setup_bot():
     bot = DriveBot()
-    
-    # Setup Telegram Bot
     application = ApplicationBuilder().token(bot.token).build()
     
-    # Handlers
-    application.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text("Aldrive Bot siap digunakan!")))
+    # Add handlers
+    application.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text("Bot siap!")))
     application.add_handler(CommandHandler("login", bot.handle_login))
     application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, bot.handle_upload))
     
     # Setup web server
-    web_app = web.Application()
-    web_app.router.add_get('/', lambda r: web.Response(text="Aldrive Bot Running"))
-    web_app.router.add_get('/oauth2callback', bot.handle_oauth_callback)
+    app = web.Application()
+    app.router.add_get('/', lambda r: web.Response(text="Bot running"))
+    app.router.add_get('/oauth2callback', bot.oauth_callback)
     
-    # Jalankan server web dan bot dalam satu loop
+    return application, app
+
+async def main():
+    application, web_app = await setup_bot()
+    
+    # Run both applications
     await application.initialize()
-    await application.start_polling()
-    await web.run_app(web_app, port=int(os.getenv('PORT', 8000)))
+    await application.start()
+    
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    await web.TCPSite(runner, '0.0.0.0', int(os.getenv('PORT', 8000))).start()
+    
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == '__main__':
-    import asyncio
     asyncio.run(main())
