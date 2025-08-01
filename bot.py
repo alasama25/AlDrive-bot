@@ -1,5 +1,4 @@
 import os
-import json
 import logging
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -7,6 +6,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+from aiohttp import web
 
 # Konfigurasi logging
 logging.basicConfig(
@@ -101,16 +101,6 @@ class DriveBot:
             "Setelah berhasil, Anda bisa langsung mengupload file."
         )
 
-    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Menangani callback dari OAuth (untuk webhook)"""
-        # Implementasi webhook handler akan ditambahkan di web server
-        pass
-
-    def setup_routes(self, app):
-        """Setup web server routes"""
-        app.router.add_get('/', lambda r: web.Response(text="Aldrive Bot Running"))
-        app.router.add_get('/oauth2callback', self.handle_oauth_callback)
-
     async def handle_oauth_callback(self, request):
         """Menangani OAuth callback"""
         try:
@@ -160,7 +150,7 @@ class DriveBot:
                 status=500
             )
 
-def setup_bot():
+async def main():
     bot = DriveBot()
     
     # Setup Telegram Bot
@@ -171,31 +161,16 @@ def setup_bot():
     application.add_handler(CommandHandler("login", bot.handle_login))
     application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, bot.handle_upload))
     
-    return application, bot
-
-def run_app():
-    from aiohttp import web
-    import threading
-    
-    # Setup bot dan web server
-    telegram_app, bot = setup_bot()
-    
-    # Jalankan web server di thread terpisah
+    # Setup web server
     web_app = web.Application()
-    bot.setup_routes(web_app)
+    web_app.router.add_get('/', lambda r: web.Response(text="Aldrive Bot Running"))
+    web_app.router.add_get('/oauth2callback', bot.handle_oauth_callback)
     
-    def run_web():
-        web.run_app(
-            web_app,
-            port=int(os.getenv('PORT', 8000)),
-            access_log=None
-        )
-    
-    web_thread = threading.Thread(target=run_web, daemon=True)
-    web_thread.start()
-    
-    # Jalankan bot Telegram
-    telegram_app.run_polling()
+    # Jalankan server web dan bot dalam satu loop
+    await application.initialize()
+    await application.start_polling()
+    await web.run_app(web_app, port=int(os.getenv('PORT', 8000)))
 
 if __name__ == '__main__':
-    run_app()
+    import asyncio
+    asyncio.run(main())
